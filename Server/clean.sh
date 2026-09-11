@@ -20,7 +20,11 @@ del() { echo -e "  ${RED}✗${NC}  $*"; }
 dim() { echo -e "  ${DIM}$*${NC}"; }
 
 bytes_to_human() {
-  local b="${1:-0}"
+  local raw="${1:-0}"
+  # Sanitize: strip anything non-numeric (handles <nil>, empty, etc.)
+  local b
+  b=$(echo "$raw" | grep -oP '^\d+' || echo 0)
+  b="${b:-0}"
   if [[ "$b" -ge 1073741824 ]]; then
     awk "BEGIN{printf \"%.1f GB\", $b/1073741824}"
   elif [[ "$b" -ge 1048576 ]]; then
@@ -82,7 +86,7 @@ if $DOCKER_OK; then
     FINISHED=$(sudo docker inspect --format '{{.State.FinishedAt}}' "$id" 2>/dev/null | cut -c1-19 | tr 'T' ' ')
     if [[ -z "$FINISHED" || "$FINISHED" == "0001-01-01"* ]]; then continue; fi
     TS=$(date -d "$FINISHED" +%s 2>/dev/null || echo 0)
-    SIZE_RAW=$(sudo docker inspect --format '{{.SizeRootFs}}' "$id" 2>/dev/null || echo 0)
+    SIZE_RAW=$(sudo docker inspect --format '{{.SizeRootFs}}' "$id" 2>/dev/null | grep -oP '^\d+' || echo 0)
     SIZE_RAW=${SIZE_RAW:-0}
     STALE_IDS+=("$id")
     AGE_DAYS=$(( ($(date +%s) - TS) / 86400 ))
@@ -259,23 +263,21 @@ echo ""
 
 if $DOCKER_OK; then
   # All stopped containers
-  if [[ ${#STALE_IDS[@]} -gt 0 ]]; then
-    echo "🗑️  Removing stopped containers..."
-    sudo docker container prune -f &>/dev/null
-    echo "  Done."
-  fi
+  echo "🗑️  Removing stopped containers..."
+  sudo docker container prune -f &>/dev/null
+  echo "  Done."
 
   # All unused images older than DAYS
   echo "🗑️  Removing unused images (>${DAYS}d)..."
   sudo docker image prune -a -f --filter "until=${HOURS}h" &>/dev/null || sudo docker image prune -a -f &>/dev/null || true
   echo "  Done."
 
-  # Unused volumes
-  if [[ ${#VOLUME_NAMES[@]} -gt 0 ]]; then
-    echo "🗑️  Removing unused volumes..."
+  # Volumes — always run after container prune (containers freed = volumes freed)
+  echo "🗑️  Removing unused volumes..."
+  if true; then
     sudo docker volume prune -f &>/dev/null
     echo "  Done."
-  fi
+  fi  # end if true
 
   echo "🗑️  Pruning Docker build cache..."
   sudo docker builder prune -a -f &>/dev/null || true
