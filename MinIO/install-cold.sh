@@ -1,9 +1,6 @@
 #!/bin/bash
 set -e
 
-# Redirect stdin from /dev/tty so read works when piped via curl | bash
-exec </dev/tty
-
 MINIO_PORT=9000
 MINIO_CONSOLE_PORT=9001
 
