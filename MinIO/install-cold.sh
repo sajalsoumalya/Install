@@ -10,25 +10,29 @@ echo "   MinIO Cold Storage Node Setup"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# ── Ask for credentials ───────────────────────────────
-echo "  Set credentials for this cold storage node."
-echo "  (min 3 chars for user, min 8 chars for password)"
+# ── Ask for credentials & endpoint ───────────────────
+echo "  Configure your cold storage node."
 echo ""
-read -rp "  Access Key (username) [default: coldadmin]: " MINIO_USER
-MINIO_USER="${MINIO_USER:-coldadmin}"
+
 while true; do
-  read -rsp "  Secret Key (password): " MINIO_PASS
-  echo ""
-  if [[ ${#MINIO_PASS} -ge 8 ]]; then
-    break
-  fi
-  echo "  ❌ Password must be at least 8 characters. Try again."
+  read -rp "  Access Key / Username (min 3 chars): " MINIO_USER
+  if [[ ${#MINIO_USER} -ge 3 ]]; then break; fi
+  echo "  ❌ Username must be at least 3 characters."
 done
 
-# ── Ask for AIStor URL ────────────────────────────────
+while true; do
+  read -rsp "  Secret Key / Password (min 8 chars): " MINIO_PASS
+  echo ""
+  if [[ ${#MINIO_PASS} -ge 8 ]]; then break; fi
+  echo "  ❌ Password must be at least 8 characters."
+done
+
 echo ""
-read -rp "  Your AIStor/MinIO server URL (e.g. https://minio.yourdomain.com): " AISTOR_URL
-AISTOR_URL="${AISTOR_URL:-https://your-minio-server.com}"
+while true; do
+  read -rp "  Your AIStor/MinIO server URL (e.g. https://minio.yourdomain.com): " AISTOR_URL
+  if [[ -n "$AISTOR_URL" ]]; then break; fi
+  echo "  ❌ Endpoint cannot be empty."
+done
 echo ""
 
 OS="$(uname -s)"
