@@ -272,12 +272,24 @@ if $DOCKER_OK; then
   sudo docker image prune -a -f --filter "until=${HOURS}h" &>/dev/null || sudo docker image prune -a -f &>/dev/null || true
   echo "  Done."
 
-  # Volumes — always run after container prune (containers freed = volumes freed)
+  # Volumes — delete explicitly by name (docker volume prune can silently skip
+  # volumes that Swarm/Dokploy still references internally)
   echo "🗑️  Removing unused volumes..."
-  if true; then
-    sudo docker volume prune -f &>/dev/null
-    echo "  Done."
-  fi  # end if true
+  VOLS_REMOVED=0
+  VOLS_FAILED=()
+  while IFS= read -r vol; do
+    [[ -z "$vol" ]] && continue
+    if sudo docker volume rm "$vol" &>/dev/null; then
+      VOLS_REMOVED=$(( VOLS_REMOVED + 1 ))
+    else
+      VOLS_FAILED+=("$vol")
+    fi
+  done < <(sudo docker volume ls -qf dangling=true 2>/dev/null)
+  echo "  Removed: $VOLS_REMOVED volumes"
+  if [[ ${#VOLS_FAILED[@]} -gt 0 ]]; then
+    echo "  ⚠️  Skipped (still in use by a service):"
+    for v in "${VOLS_FAILED[@]}"; do echo "    - $v"; done
+  fi
 
   echo "🗑️  Pruning Docker build cache..."
   sudo docker builder prune -a -f &>/dev/null || true
