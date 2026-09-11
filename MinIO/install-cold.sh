@@ -4,6 +4,11 @@ set -e
 MINIO_PORT=9000
 MINIO_CONSOLE_PORT=9001
 
+# Helper: read from terminal even when script is piped via curl | bash
+ask()    { read -rp  "$1" "$2" </dev/tty; }
+askpass(){ read -rsp "$1" "$2" </dev/tty; echo ""; }
+askenter(){ read -r  </dev/tty; }
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "   MinIO Cold Storage Node Setup"
@@ -13,47 +18,44 @@ echo ""
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
-# ── Request sudo upfront ──────────────────────────────
-echo "  This script needs admin (sudo) access to install software."
-echo "  Please enter your system password when prompted."
-echo ""
-sudo -v
-# Keep sudo alive throughout the script
-while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
-
 # ── Detect OS ─────────────────────────────────────────
 if [[ "$OS" == "Darwin" ]]; then
   OS_NAME="macOS"
 elif [[ "$OS" == "Linux" ]]; then
   OS_NAME="Linux"
 else
-  echo "❌ Windows detected. Please run this in WSL2."
+  echo "❌ Windows: Please run this inside WSL2."
   echo "   https://learn.microsoft.com/en-us/windows/wsl/install"
   exit 1
 fi
 echo "  Detected OS : $OS_NAME ($ARCH)"
 echo ""
 
+# ── Request sudo upfront ──────────────────────────────
+echo "  This script needs admin access. Enter your system password:"
+sudo -v </dev/tty
+while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+
 # ── Ask credentials & endpoint ────────────────────────
+echo ""
 echo "  Configure your cold storage node."
 echo ""
 
 while true; do
-  read -rp "  Access Key / Username (min 3 chars): " MINIO_USER
+  ask "  Access Key / Username (min 3 chars): " MINIO_USER
   [[ ${#MINIO_USER} -ge 3 ]] && break
   echo "  ❌ Username must be at least 3 characters."
 done
 
 while true; do
-  read -rsp "  Secret Key / Password (min 8 chars): " MINIO_PASS
-  echo ""
+  askpass "  Secret Key / Password (min 8 chars): " MINIO_PASS
   [[ ${#MINIO_PASS} -ge 8 ]] && break
   echo "  ❌ Password must be at least 8 characters."
 done
 
 echo ""
 while true; do
-  read -rp "  Your AIStor/MinIO server URL (e.g. https://minio.yourdomain.com): " AISTOR_URL
+  ask "  Your AIStor/MinIO server URL (e.g. https://minio.yourdomain.com): " AISTOR_URL
   [[ -n "$AISTOR_URL" ]] && break
   echo "  ❌ Endpoint cannot be empty."
 done
@@ -64,7 +66,7 @@ pick_machine_name() {
   echo "  Each machine gets its own unique Tier in AIStor."
   echo "  Examples: laptop, pc, nas, office-pc, home-server"
   echo ""
-  read -rp "  Enter a name for this machine [default: laptop]: " MACHINE_NAME
+  ask "  Enter a name for this machine [default: laptop]: " MACHINE_NAME
   MACHINE_NAME="${MACHINE_NAME:-laptop}"
   MACHINE_NAME=$(echo "$MACHINE_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '-' | tr -cd 'a-z0-9-')
   TUNNEL_NAME="cold-$MACHINE_NAME"
@@ -78,6 +80,7 @@ pick_machine_name() {
 }
 
 # ── Install Docker ────────────────────────────────────
+DOCKER_CMD="docker"
 install_docker() {
   if command -v docker &>/dev/null; then
     echo "✅ Docker already installed"
@@ -88,11 +91,11 @@ install_docker() {
     if command -v brew &>/dev/null; then
       brew install --cask docker
       echo "   ⚠️  Open Docker Desktop from Applications, then press Enter."
-      read -r
+      askenter
     else
       echo "   ⚠️  Install Docker Desktop from https://www.docker.com/products/docker-desktop/"
       echo "   Then press Enter to continue."
-      read -r
+      askenter
     fi
   elif [[ "$OS" == "Linux" ]]; then
     curl -fsSL https://get.docker.com | sh
@@ -100,13 +103,9 @@ install_docker() {
     sudo systemctl enable docker
     sudo systemctl start docker
     DOCKER_CMD="sudo docker"
-    echo "✅ Docker installed"
-    return
   fi
   echo "✅ Docker ready"
 }
-
-DOCKER_CMD="docker"
 
 # ── Pick Storage Drive ────────────────────────────────
 pick_drive() {
@@ -120,7 +119,7 @@ pick_drive() {
   echo "  Enter the path where cold storage data should be saved."
   echo "  Example: /  or  /Volumes/MyDrive  or  /mnt/data"
   echo ""
-  read -rp "  Storage path [default: $HOME/minio-cold]: " CUSTOM_PATH
+  ask "  Storage path [default: $HOME/minio-cold]: " CUSTOM_PATH
   MINIO_DATA="${CUSTOM_PATH:-$HOME/minio-cold}"
   echo ""
   echo "  ✅ Data will be stored at: $MINIO_DATA"
@@ -134,7 +133,7 @@ pick_size() {
   echo ""
   echo "  How many GB should this cold storage node use?"
   echo ""
-  read -rp "  Storage quota in GB [default: 50]: " QUOTA_GB
+  ask "  Storage quota in GB [default: 50]: " QUOTA_GB
   QUOTA_GB="${QUOTA_GB:-50}"
   echo ""
   echo "  ✅ Quota set to: ${QUOTA_GB}GB"
@@ -216,7 +215,7 @@ setup_tunnel() {
   CONFIG_DIR="$HOME/.cloudflared"
   mkdir -p "$CONFIG_DIR"
 
-  cat > "$CONFIG_DIR/config.yml" <<EOF
+  cat > "$CONFIG_DIR/config.yml" <<CFEOF
 tunnel: $TUNNEL_ID
 credentials-file: $CONFIG_DIR/$TUNNEL_ID.json
 
@@ -224,7 +223,7 @@ ingress:
   - hostname: $TUNNEL_DOMAIN
     service: http://localhost:$MINIO_PORT
   - service: http_status:404
-EOF
+CFEOF
 
   echo "⚙️  Installing tunnel as a system service (auto-starts on reboot)..."
   sudo cloudflared service install
@@ -240,15 +239,16 @@ EOF
   echo "  Public URL   : https://$TUNNEL_DOMAIN"
   echo "  Local UI     : http://localhost:$MINIO_CONSOLE_PORT"
   echo ""
-  echo "  ┌─ Add Tier in AIStor ($AISTOR_URL) ─────────┐"
-  echo "  │  Administrator → Tiers → Add Tier → MinIO  │"
-  echo "  │                                             │"
+  echo "  ┌─ Add Tier in AIStor ────────────────────────────────┐"
+  echo "  │  $AISTOR_URL"
+  echo "  │  Administrator → Tiers → Add Tier → MinIO           │"
+  echo "  │                                                      │"
   echo "  │  Tier Name  → $TIER_NAME"
   echo "  │  Endpoint   → https://$TUNNEL_DOMAIN"
   echo "  │  Access Key → $MINIO_USER"
   echo "  │  Secret Key → (your password)"
   echo "  │  Bucket     → $BUCKET_NAME"
-  echo "  └─────────────────────────────────────────────┘"
+  echo "  └──────────────────────────────────────────────────────┘"
   echo ""
   echo "  Run this script on each machine with a different name."
   echo ""
