@@ -5,6 +5,7 @@ set -e
 ask() { read -rp "$1" "$2" </dev/tty; }
 
 DAYS=7
+HOURS=$(( DAYS * 24 ))
 
 RED='\033[0;31m'
 YEL='\033[1;33m'
@@ -14,24 +15,28 @@ DIM='\033[2m'
 NC='\033[0m'
 
 hr()  { echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; }
-bold(){ echo -e "  ${YEL}$*${NC}"; }
 ok()  { echo -e "  ${GRN}✔${NC}  $*"; }
 del() { echo -e "  ${RED}✗${NC}  $*"; }
 dim() { echo -e "  ${DIM}$*${NC}"; }
 
 bytes_to_human() {
-  local b="$1"
-  if [[ $b -ge 1073741824 ]]; then printf "%.1f GB" "$(echo "$b 1073741824" | awk '{printf "%.1f", $1/$2}')";
-  elif [[ $b -ge 1048576 ]]; then printf "%.1f MB" "$(echo "$b 1048576" | awk '{printf "%.1f", $1/$2}')";
-  elif [[ $b -ge 1024 ]]; then printf "%.1f KB" "$(echo "$b 1024" | awk '{printf "%.1f", $1/$2}')";
-  else printf "%d B" "$b"; fi
+  local b="${1:-0}"
+  if [[ "$b" -ge 1073741824 ]]; then
+    awk "BEGIN{printf \"%.1f GB\", $b/1073741824}"
+  elif [[ "$b" -ge 1048576 ]]; then
+    awk "BEGIN{printf \"%.1f MB\", $b/1048576}"
+  elif [[ "$b" -ge 1024 ]]; then
+    awk "BEGIN{printf \"%.1f KB\", $b/1024}"
+  else
+    echo "${b} B"
+  fi
 }
 
 echo ""
 hr
 echo "  VPS Cleanup — Dynamic Preview"
-echo "  Will scan: stopped containers (>${DAYS}d), images, volumes,"
-echo "             build cache, apt cache, journal logs, /tmp"
+echo "  Scans: containers (all stopped), unused images (>${DAYS}d),"
+echo "         volumes, build cache, apt cache, journal logs, /tmp"
 hr
 echo ""
 
@@ -49,9 +54,8 @@ echo -e "${BLU}  Scanning — please wait...${NC}"
 echo ""
 
 CUTOFF_EPOCH=$(date -d "-${DAYS} days" +%s 2>/dev/null)
-TOTAL_BYTES=0
 
-# ━━━━━━━━━━━━━━━━━━━━ DOCKER ━━━━━━━━━━━━━━━━━━━━━━
+# ━━━━━━━━━━━━━━━━━━━━ DOCKER ━━━━━━━━━━━━━━━━━━━━━
 DOCKER_OK=false
 if command -v docker &>/dev/null && sudo docker info &>/dev/null 2>&1; then
   DOCKER_OK=true
@@ -61,7 +65,8 @@ STALE_IDS=()
 STALE_LABELS=()
 CONTAINER_BYTES=0
 
-DANGLING_IDS=()
+UNUSED_IMAGE_IDS=()
+UNUSED_IMAGE_LABELS=()
 IMAGE_BYTES=0
 
 VOLUME_NAMES=()
@@ -70,65 +75,101 @@ VOLUME_BYTES=0
 BUILD_BYTES=0
 
 if $DOCKER_OK; then
-  # Stale stopped containers
+  # ── All stopped containers (any age) ──────────────
   while IFS= read -r id; do
     [[ -z "$id" ]] && continue
     NAME=$(sudo docker inspect --format '{{.Name}}' "$id" 2>/dev/null | sed 's|^/||')
     FINISHED=$(sudo docker inspect --format '{{.State.FinishedAt}}' "$id" 2>/dev/null | cut -c1-19 | tr 'T' ' ')
     if [[ -z "$FINISHED" || "$FINISHED" == "0001-01-01"* ]]; then continue; fi
     TS=$(date -d "$FINISHED" +%s 2>/dev/null || echo 0)
-    if [[ "$TS" -lt "$CUTOFF_EPOCH" ]]; then
-      SIZE_RAW=$(sudo docker inspect --format '{{.SizeRootFs}}' "$id" 2>/dev/null || echo 0)
-      STALE_IDS+=("$id")
-      AGE_DAYS=$(( ($(date +%s) - TS) / 86400 ))
-      STALE_LABELS+=("$NAME  [stopped ${AGE_DAYS}d ago]  $(bytes_to_human ${SIZE_RAW:-0})")
-      CONTAINER_BYTES=$(( CONTAINER_BYTES + ${SIZE_RAW:-0} ))
-    fi
-  done < <(sudo docker ps -a --filter status=exited --filter status=created -q 2>/dev/null)
+    SIZE_RAW=$(sudo docker inspect --format '{{.SizeRootFs}}' "$id" 2>/dev/null || echo 0)
+    SIZE_RAW=${SIZE_RAW:-0}
+    STALE_IDS+=("$id")
+    AGE_DAYS=$(( ($(date +%s) - TS) / 86400 ))
+    STALE_LABELS+=("$NAME  [stopped ${AGE_DAYS}d ago]  $(bytes_to_human $SIZE_RAW)")
+    CONTAINER_BYTES=$(( CONTAINER_BYTES + SIZE_RAW ))
+  done < <(sudo docker ps -a --filter status=exited --filter status=created --filter status=dead -q 2>/dev/null)
 
-  # Dangling images
+  # ── Unused images older than DAYS ─────────────────
+  # Images not used by any container (running or stopped), older than DAYS
   while IFS= read -r id; do
     [[ -z "$id" ]] && continue
+    REPO=$(sudo docker image inspect --format '{{index .RepoTags 0}}' "$id" 2>/dev/null || echo "<none>")
     SIZE_RAW=$(sudo docker image inspect --format '{{.Size}}' "$id" 2>/dev/null || echo 0)
-    DANGLING_IDS+=("$id")
-    IMAGE_BYTES=$(( IMAGE_BYTES + ${SIZE_RAW:-0} ))
+    SIZE_RAW=${SIZE_RAW:-0}
+    CREATED=$(sudo docker image inspect --format '{{.Created}}' "$id" 2>/dev/null | cut -c1-19 | tr 'T' ' ')
+    CTS=$(date -d "$CREATED" +%s 2>/dev/null || echo 0)
+    if [[ "$CTS" -lt "$CUTOFF_EPOCH" ]]; then
+      UNUSED_IMAGE_IDS+=("$id")
+      UNUSED_IMAGE_LABELS+=("$REPO  $(bytes_to_human $SIZE_RAW)")
+      IMAGE_BYTES=$(( IMAGE_BYTES + SIZE_RAW ))
+    fi
+  done < <(sudo docker images --filter "dangling=false" -q 2>/dev/null | sort -u)
+  # Also add dangling images
+  while IFS= read -r id; do
+    [[ -z "$id" ]] && continue
+    # Skip if already in list
+    for existing in "${UNUSED_IMAGE_IDS[@]:-}"; do [[ "$existing" == "$id" ]] && continue 2; done
+    SIZE_RAW=$(sudo docker image inspect --format '{{.Size}}' "$id" 2>/dev/null || echo 0)
+    SIZE_RAW=${SIZE_RAW:-0}
+    UNUSED_IMAGE_IDS+=("$id")
+    UNUSED_IMAGE_LABELS+=("<none>  $(bytes_to_human $SIZE_RAW)")
+    IMAGE_BYTES=$(( IMAGE_BYTES + SIZE_RAW ))
   done < <(sudo docker images -f "dangling=true" -q 2>/dev/null)
 
-  # Unused volumes
+  # Filter out images actually used by a container (running or stopped)
+  USED_IDS=()
+  while IFS= read -r id; do
+    [[ -n "$id" ]] && USED_IDS+=("$id")
+  done < <(sudo docker ps -a --format '{{.Image}}' 2>/dev/null | xargs -I{} sudo docker inspect --format '{{.Id}}' {} 2>/dev/null || true)
+
+  FILTERED_IMAGE_IDS=()
+  FILTERED_IMAGE_LABELS=()
+  IMAGE_BYTES=0
+  for i in "${!UNUSED_IMAGE_IDS[@]}"; do
+    ID="${UNUSED_IMAGE_IDS[$i]}"
+    USED=false
+    for uid in "${USED_IDS[@]:-}"; do
+      if [[ "$uid" == "$ID"* ]] || [[ "$ID" == "$uid"* ]]; then USED=true; break; fi
+    done
+    if ! $USED; then
+      FILTERED_IMAGE_IDS+=("$ID")
+      FILTERED_IMAGE_LABELS+=("${UNUSED_IMAGE_LABELS[$i]}")
+      SIZE_RAW=$(sudo docker image inspect --format '{{.Size}}' "$ID" 2>/dev/null || echo 0)
+      IMAGE_BYTES=$(( IMAGE_BYTES + ${SIZE_RAW:-0} ))
+    fi
+  done
+  UNUSED_IMAGE_IDS=("${FILTERED_IMAGE_IDS[@]:-}")
+  UNUSED_IMAGE_LABELS=("${FILTERED_IMAGE_LABELS[@]:-}")
+
+  # ── Unused volumes ─────────────────────────────────
   while IFS= read -r vol; do
     [[ -z "$vol" ]] && continue
     MOUNTPOINT=$(sudo docker volume inspect --format '{{.Mountpoint}}' "$vol" 2>/dev/null)
     SIZE_RAW=$(sudo du -sb "$MOUNTPOINT" 2>/dev/null | awk '{print $1}' || echo 0)
-    VOLUME_NAMES+=("$vol  $(bytes_to_human ${SIZE_RAW:-0})")
-    VOLUME_BYTES=$(( VOLUME_BYTES + ${SIZE_RAW:-0} ))
+    SIZE_RAW=${SIZE_RAW:-0}
+    VOLUME_NAMES+=("$vol  $(bytes_to_human $SIZE_RAW)")
+    VOLUME_BYTES=$(( VOLUME_BYTES + SIZE_RAW ))
   done < <(sudo docker volume ls -qf dangling=true 2>/dev/null)
 
-  # Build cache
-  BUILD_CACHE_RAW=$(sudo docker system df --format '{{json .}}' 2>/dev/null \
-    | grep -i '"Type":"Build Cache"' \
-    | grep -oP '"Size":"\K[^"]+' || echo "0B")
-  # Try numeric from docker system df
-  BUILD_LINE=$(sudo docker system df 2>/dev/null | grep -i "Build Cache" || true)
-  BUILD_BYTES_RAW=$(echo "$BUILD_LINE" | awk '{print $4}' | sed 's/B$//' | \
-    awk '{
-      if ($1 ~ /GB/) { sub(/GB/,"",$1); printf "%d", $1*1073741824 }
-      else if ($1 ~ /MB/) { sub(/MB/,"",$1); printf "%d", $1*1048576 }
-      else if ($1 ~ /kB/) { sub(/kB/,"",$1); printf "%d", $1*1024 }
-      else printf "%d", $1
-    }' 2>/dev/null || echo 0)
-  BUILD_BYTES=${BUILD_BYTES_RAW:-0}
+  # ── Build cache size ───────────────────────────────
+  BUILD_LINE=$(sudo docker system df 2>/dev/null | awk '/Build Cache/{print $4}')
+  BUILD_BYTES=$(echo "${BUILD_LINE:-0}" | awk '{
+    v=$1
+    if (v ~ /GB/) { sub(/GB/,"",v); printf "%d", v*1073741824 }
+    else if (v ~ /MB/) { sub(/MB/,"",v); printf "%d", v*1048576 }
+    else if (v ~ /kB/) { sub(/kB/,"",v); printf "%d", v*1024 }
+    else { gsub(/[^0-9]/,"",v); printf "%d", v+0 }
+  }' 2>/dev/null || echo 0)
 fi
 
-# ━━━━━━━━━━━━━━━━━━━━ SYSTEM ━━━━━━━━━━━━━━━━━━━━━━
-# Apt cache
+# ━━━━━━━━━━━━━━━━━━━━ SYSTEM ━━━━━━━━━━━━━━━━━━━━━
 APT_BYTES=$(sudo du -sb /var/cache/apt/archives/ 2>/dev/null | awk '{print $1}' || echo 0)
 APT_LIST_BYTES=$(sudo du -sb /var/cache/apt/lists/ 2>/dev/null | awk '{print $1}' || echo 0)
-APT_TOTAL=$(( APT_BYTES + APT_LIST_BYTES ))
+APT_TOTAL=$(( ${APT_BYTES:-0} + ${APT_LIST_BYTES:-0} ))
 
-# Journal logs (total; we vacuum to 7d)
 JOURNAL_BYTES=$(journalctl --disk-usage 2>/dev/null | grep -oP '[\d]+(?= bytes)' | head -1 || echo 0)
 
-# /tmp old files
 TMP_FILES=()
 TMP_BYTES=0
 while IFS= read -r f; do
@@ -138,12 +179,10 @@ while IFS= read -r f; do
   TMP_BYTES=$(( TMP_BYTES + ${SIZE_RAW:-0} ))
 done < <(sudo find /tmp -maxdepth 2 -mtime +${DAYS} 2>/dev/null)
 
-# Page cache (always available, size = cached in /proc/meminfo)
 PAGE_CACHE_KB=$(awk '/^Cached:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
-PAGE_CACHE_BYTES=$(( PAGE_CACHE_KB * 1024 ))
+PAGE_CACHE_BYTES=$(( ${PAGE_CACHE_KB:-0} * 1024 ))
 
-# ━━━━━━━━━━━━━━━━━━━━ GRAND TOTAL ━━━━━━━━━━━━━━━━━
-TOTAL_BYTES=$(( CONTAINER_BYTES + IMAGE_BYTES + VOLUME_BYTES + BUILD_BYTES + APT_TOTAL + JOURNAL_BYTES + TMP_BYTES + PAGE_CACHE_BYTES ))
+TOTAL_BYTES=$(( CONTAINER_BYTES + IMAGE_BYTES + VOLUME_BYTES + BUILD_BYTES + APT_TOTAL + ${JOURNAL_BYTES:-0} + TMP_BYTES + PAGE_CACHE_BYTES ))
 
 # ━━━━━━━━━━━━━━━━━━━━ PRINT PREVIEW ━━━━━━━━━━━━━━
 hr
@@ -153,30 +192,27 @@ hr
 if $DOCKER_OK; then
   # Containers
   if [[ ${#STALE_IDS[@]} -gt 0 ]]; then
-    echo "  Stopped containers  >  ${DAYS}d old:"
+    echo "  All stopped containers (${#STALE_IDS[@]}):"
     for label in "${STALE_LABELS[@]}"; do del "$label"; done
     echo -e "  ${DIM}Subtotal: $(bytes_to_human $CONTAINER_BYTES)${NC}"
   else
-    ok "No stale containers found"
+    ok "No stopped containers"
   fi
   echo ""
 
   # Images
-  if [[ ${#DANGLING_IDS[@]} -gt 0 ]]; then
-    echo "  Dangling images: ${#DANGLING_IDS[@]}"
-    for id in "${DANGLING_IDS[@]}"; do
-      TAG=$(sudo docker image inspect --format '{{index .RepoTags 0}}' "$id" 2>/dev/null || echo "<none>")
-      del "$id  $TAG"
-    done
+  if [[ ${#UNUSED_IMAGE_IDS[@]} -gt 0 ]]; then
+    echo "  Unused images older than ${DAYS}d (${#UNUSED_IMAGE_IDS[@]}):"
+    for label in "${UNUSED_IMAGE_LABELS[@]}"; do del "$label"; done
     echo -e "  ${DIM}Subtotal: $(bytes_to_human $IMAGE_BYTES)${NC}"
   else
-    ok "No dangling images"
+    ok "No unused images older than ${DAYS}d"
   fi
   echo ""
 
   # Volumes
   if [[ ${#VOLUME_NAMES[@]} -gt 0 ]]; then
-    echo "  Unused volumes: ${#VOLUME_NAMES[@]}"
+    echo "  Unused volumes (${#VOLUME_NAMES[@]}):"
     for v in "${VOLUME_NAMES[@]}"; do del "$v"; done
     echo -e "  ${DIM}Subtotal: $(bytes_to_human $VOLUME_BYTES)${NC}"
   else
@@ -184,14 +220,13 @@ if $DOCKER_OK; then
   fi
   echo ""
 
-  # Build cache
-  if [[ "$BUILD_BYTES" -gt 0 ]]; then
+  if [[ "${BUILD_BYTES:-0}" -gt 0 ]]; then
     del "Docker build cache  →  $(bytes_to_human $BUILD_BYTES)"
   else
     ok "Build cache is empty"
   fi
 else
-  dim "Docker not available / not running — skipped"
+  dim "Docker not available — skipped"
 fi
 
 echo ""
@@ -199,28 +234,9 @@ hr
 echo -e "  ${YEL}SYSTEM${NC}"
 hr
 
-# Apt
-if [[ "$APT_TOTAL" -gt 0 ]]; then
-  del "APT package cache  →  $(bytes_to_human $APT_TOTAL)"
-else
-  ok "APT cache already clean"
-fi
-
-# Journal
-if [[ "$JOURNAL_BYTES" -gt 0 ]]; then
-  del "Journal logs (total, keep last ${DAYS}d)  →  $(bytes_to_human $JOURNAL_BYTES)"
-else
-  ok "Journal empty"
-fi
-
-# /tmp
-if [[ ${#TMP_FILES[@]} -gt 0 ]]; then
-  del "/tmp files older than ${DAYS}d  →  ${#TMP_FILES[@]} items  ($(bytes_to_human $TMP_BYTES))"
-else
-  ok "No old /tmp files"
-fi
-
-# Page cache
+[[ "${APT_TOTAL:-0}" -gt 0 ]] && del "APT package cache  →  $(bytes_to_human $APT_TOTAL)" || ok "APT cache clean"
+[[ "${JOURNAL_BYTES:-0}" -gt 0 ]] && del "Journal logs (keep last ${DAYS}d)  →  $(bytes_to_human $JOURNAL_BYTES)" || ok "Journal empty"
+[[ ${#TMP_FILES[@]} -gt 0 ]] && del "/tmp files older than ${DAYS}d  →  ${#TMP_FILES[@]} items  ($(bytes_to_human $TMP_BYTES))" || ok "No old /tmp files"
 del "System page cache (RAM, reclaimable)  →  $(bytes_to_human $PAGE_CACHE_BYTES)"
 
 echo ""
@@ -242,56 +258,74 @@ hr
 echo ""
 
 if $DOCKER_OK; then
+  # All stopped containers
   if [[ ${#STALE_IDS[@]} -gt 0 ]]; then
-    echo "🗑️  Removing stale containers..."
-    for id in "${STALE_IDS[@]}"; do
-      sudo docker rm "$id" &>/dev/null && echo "  Removed $id" || true
-    done
+    echo "🗑️  Removing stopped containers..."
+    sudo docker container prune -f &>/dev/null
+    echo "  Done."
   fi
 
-  if [[ ${#DANGLING_IDS[@]} -gt 0 ]]; then
-    echo "🗑️  Removing dangling images..."
-    sudo docker image prune -f &>/dev/null
-  fi
+  # All unused images older than DAYS
+  echo "🗑️  Removing unused images (>${DAYS}d)..."
+  sudo docker image prune -a -f --filter "until=${HOURS}h" &>/dev/null || sudo docker image prune -a -f &>/dev/null || true
+  echo "  Done."
 
+  # Unused volumes
   if [[ ${#VOLUME_NAMES[@]} -gt 0 ]]; then
     echo "🗑️  Removing unused volumes..."
     sudo docker volume prune -f &>/dev/null
+    echo "  Done."
   fi
 
-  echo "🗑️  Pruning Docker build cache (>${DAYS}d)..."
-  sudo docker builder prune -f &>/dev/null || true
+  echo "🗑️  Pruning Docker build cache..."
+  sudo docker builder prune -a -f &>/dev/null || true
+  echo "  Done."
 
   echo "🗑️  Removing unused Docker networks..."
   sudo docker network prune -f &>/dev/null || true
+  echo "  Done."
 fi
 
 echo "🗑️  Cleaning APT cache..."
 sudo apt-get clean -y &>/dev/null || true
 sudo apt-get autoclean -y &>/dev/null || true
 sudo apt-get autoremove -y --purge &>/dev/null || true
+echo "  Done."
 
 echo "🗑️  Vacuuming journal logs (keeping last ${DAYS}d)..."
 sudo journalctl --vacuum-time=${DAYS}d &>/dev/null || true
+echo "  Done."
 
 if [[ ${#TMP_FILES[@]} -gt 0 ]]; then
   echo "🗑️  Removing old /tmp files..."
   sudo find /tmp -maxdepth 2 -mtime +${DAYS} -delete 2>/dev/null || true
+  echo "  Done."
 fi
 
 echo "🗑️  Dropping system page cache..."
 sudo sync && sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+echo "  Done."
 
 echo ""
 hr
 echo -e "  ${GRN}✅ Done!${NC}"
 hr
 echo ""
+
 echo "  Disk usage now:"
 df -h / | awk 'NR>1 {printf "    %-20s  used: %-8s  free: %-8s  (%s full)\n", $1, $3, $4, $5}'
 echo ""
+
 if $DOCKER_OK; then
   echo "  Docker summary:"
-  sudo docker system df 2>/dev/null | awk 'NR>1 {printf "    %-22s  size: %-10s  reclaimable: %s\n", $1, $3, $4}' || true
+  sudo docker system df 2>/dev/null | awk '
+    NR==1 { next }
+    {
+      type=$1; size=$4; reclaim=$5
+      # Handle "Local Volumes" which spans two words
+      if ($1=="Local") { type="Local Volumes"; size=$5; reclaim=$6 }
+      printf "    %-22s  size: %-12s  reclaimable: %s\n", type, size, reclaim
+    }
+  ' || true
   echo ""
 fi
