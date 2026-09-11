@@ -3,13 +3,32 @@ set -e
 
 MINIO_PORT=9000
 MINIO_CONSOLE_PORT=9001
-MINIO_USER="coldadmin"
-MINIO_PASS="coldpass123"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "   MinIO Cold Storage Setup — soumalya.in"
+echo "   MinIO Cold Storage Node Setup"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# ── Ask for credentials ───────────────────────────────
+echo "  Set credentials for this cold storage node."
+echo "  (min 3 chars for user, min 8 chars for password)"
+echo ""
+read -rp "  Access Key (username) [default: coldadmin]: " MINIO_USER
+MINIO_USER="${MINIO_USER:-coldadmin}"
+while true; do
+  read -rsp "  Secret Key (password): " MINIO_PASS
+  echo ""
+  if [[ ${#MINIO_PASS} -ge 8 ]]; then
+    break
+  fi
+  echo "  ❌ Password must be at least 8 characters. Try again."
+done
+
+# ── Ask for AIStor URL ────────────────────────────────
+echo ""
+read -rp "  Your AIStor/MinIO server URL (e.g. https://minio.yourdomain.com): " AISTOR_URL
+AISTOR_URL="${AISTOR_URL:-https://your-minio-server.com}"
 echo ""
 
 OS="$(uname -s)"
@@ -227,7 +246,8 @@ EOF
   echo "  Permanent URL    : https://$TUNNEL_DOMAIN"
   echo "  Local Console    : http://localhost:$MINIO_CONSOLE_PORT"
   echo ""
-  echo "  ┌─ Add this Tier in AIStor (minio.soumalya.in) ──────────────┐"
+  echo "  ┌─ Add this Tier in your AIStor console ─────────────────────┐"
+  echo "  │  $AISTOR_URL"
   echo "  │  Administrator → Tiers → Add Tier → MinIO                  │"
   echo "  │                                                             │"
   echo "  │  Tier Name  → $TIER_NAME"
